@@ -14,15 +14,16 @@
 	"author": "octoshrimpy",
 	"devDependencies": {
 		"@types/node": "^20.11.0",
-		"@typescript-eslint/eslint-plugin": "5.29.0",
-		"@typescript-eslint/parser": "5.29.0",
+		"@typescript-eslint/eslint-plugin": "^8.39.1",
+		"@typescript-eslint/parser": "^8.39.1",
 		"builtin-modules": "3.3.0",
-		"esbuild": "^0.21.0",
+		"esbuild": "^0.25.9",
+		"eslint": "^9.33.0",
 		"obsidian": "latest",
 		"tslib": "2.4.0",
 		"typescript": "^5.4.0"
 	},
 	"dependencies": {
-		"@remotion/whisper-web": "^0.0.8"
-	}f
+		"@remotion/whisper-web": "^4.0.0"
+	}
 }
