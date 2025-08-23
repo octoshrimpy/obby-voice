@@ -1,3 +1,4 @@
+// asr.ts
 let asrPipeline: any = null;
 
 export async function getASRPipeline(
@@ -7,7 +8,6 @@ export async function getASRPipeline(
   if (asrPipeline) return asrPipeline;
 
   const { pipeline, env } = await import("@xenova/transformers");
-
   env.useBrowserCache = true;
   env.allowLocalModels = false;
   if (env.backends?.onnx?.wasm) {
@@ -26,6 +26,16 @@ export async function getASRPipeline(
       if (p.status) onProgress(`${p.status}…`, pct);
     },
   });
-
   return asrPipeline;
+}
+
+// small convenience wrapper
+export async function transcribePCM16k(
+  pcm16k: Float32Array,
+  modelId: string,
+  onProgress?: (msg: string, pct?: number) => void
+): Promise<string> {
+  const asr = await getASRPipeline(modelId, onProgress);
+  const out = await asr(pcm16k, { sampling_rate: 16000 });
+  return (out?.text || "").trim();
 }

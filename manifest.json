@@ -1,7 +1,7 @@
 {
 	"id": "obby-voice",
 	"name": "Obby Voice",
-	"version": "0.1.11",
+	"version": "0.1.25",
 	"minAppVersion": "1.5.0",
 	"description": "Quick speech-to-text into a daily Inbox note via Whisper WASM, with mobile command.",
 	"author": "octohsrimpy",

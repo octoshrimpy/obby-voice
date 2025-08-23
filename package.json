@@ -1,14 +1,14 @@
 {
 	"name": "obby-voice",
-	"version": "0.1.11",
+	"version": "0.1.25",
 	"private": true,
 	"license": "MIT",
 	"description": "Quick speech-to-text into a daily Inbox note via Whisper WASM, with mobile command.",
-	"main": "main.js",
+	"main": "src/main.js",
 	"scripts": {
-		"dev": "esbuild main.ts --bundle --outfile=main.js --format=cjs --platform=browser --target=es2020 --external:obsidian --watch",
-		"build": "node ./version-bump.mjs && esbuild main.ts --bundle --minify --outfile=main.js --format=cjs --platform=browser --target=es2020 --external:obsidian",
-		"deploy": "cpy main.js manifest.json styles.css \"/var/home/octoshrimpy/Documents/Project Luminari/.obsidian/plugins/obby-voice/\" --flat --no-overwrite=false",
+		"dev": "esbuild 'src/main.ts' --bundle --outfile=main.js --format=cjs --platform=browser --target=es2020 --external:obsidian --watch",
+		"build": "node ./version-bump.mjs && esbuild 'src/main.ts' --bundle --minify --outfile=main.js --format=cjs --platform=browser --target=es2020 --external:obsidian",
+		"deploy": "cpy 'manifest.json' 'styles.css' 'main.js' \"/var/home/octoshrimpy/Documents/Project Luminari/.obsidian/plugins/obby-voice/\" --parents --no-overwrite=false",
 		"local:patch": "npm --no-git-tag-version version patch && npm run build && npm run deploy",
 		"local:minor": "npm --no-git-tag-version version minor && npm run build && npm run deploy",
 		"local:major": "npm --no-git-tag-version version major && npm run build && npm run deploy"

@@ -1,7 +1,7 @@
 import { App, Modal, Notice } from "obsidian";
 import type { ObbyVoiceSettings } from "../types";
 import { ensureMicPermission, pickMimeType, decodeAndResampleTo16k } from "../audio";
-import { getASRPipeline } from "../asr";
+import { getASRPipeline, transcribePCM16k } from "../asr";
 import { appendToDailyInbox, saveAudioPerSettings } from "../storage";
 
 export class RecordModal extends Modal {
@@ -247,8 +247,7 @@ export class RecordModal extends Modal {
       });
 
       this.note.setText("Transcribing…");
-      const out = await asr(pcm16k, { sampling_rate: 16000 });
-      const text: string = (out?.text || "").trim();
+      const text = await transcribePCM16k(pcm16k, this.settings.modelId);
 
       const saved = await saveAudioPerSettings(this.app, this.settings, pcm16k, webmBlob, new Date(endedAtMs));
       const savedPath = saved.path;
