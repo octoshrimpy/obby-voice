@@ -12,36 +12,34 @@ import {
   DropdownComponent,
 } from "obsidian";
 
-// ---------------- Types & support cache ----------------
+// =========================
+// Settings & Defaults
+// =========================
 
-type SupportStatus = { supported: boolean; reason?: string };
-let SUPPORT: SupportStatus = { supported: true };
+interface ObbyVoiceSettings {
+  // Inbox / note formatting
+  inboxFolder: string;             // e.g., "Inbox"
+  filenameDateFormat: string;      // e.g., "YYYY-MM-DD"
+  entryDateFormat: string;         // e.g., "MMM D, YYYY h:mm A"
 
-// ---------------- Settings ----------------
-
-interface VoiceInboxSettings {
-  inboxFolder: string;              // folder for YYYY-MM-DD.md
-  filenameDateFormat: string;       // e.g., "YYYY-MM-DD"
-  entryDateFormat: string;          // e.g., "MMM D, YYYY h:mm A"
-
-  // STT (transformers) model id
-  modelId: string;                  // e.g., "Xenova/whisper-tiny.en"
+  // STT model
+  modelId: string;                 // e.g., "Xenova/whisper-tiny.en"
 
   // Mic selection
-  inputDeviceId: string;            // exact deviceId or "" for default
+  inputDeviceId: string;           // exact deviceId or "" for default
 
   // Audio saving
-  saveAudioFile: boolean;           // default true (save MP3)
-  audioFormat: "mp3" | "webm";      // default "mp3"
-  audioSubfolder: string;           // optional subfolder for saved audio
+  saveAudioFile: boolean;          // true = save audio alongside transcript
+  audioFormat: "mp3" | "webm";     // default mp3
+  audioSubfolder: string;          // subfolder inside inbox to store audio
 
-  // Low-confidence / failure handling (still used for notes/warnings)
+  // Low-confidence behavior
   saveAudioOnLowConfidence: boolean;
-  lowConfMinDurationMs: number;     // min duration to evaluate WPM
-  lowConfMinWpm: number;            // WPM threshold
+  lowConfMinDurationMs: number;
+  lowConfMinWpm: number;
 }
 
-const DEFAULT_SETTINGS: VoiceInboxSettings = {
+const DEFAULT_SETTINGS: ObbyVoiceSettings = {
   inboxFolder: "Inbox",
   filenameDateFormat: "YYYY-MM-DD",
   entryDateFormat: "MMM D, YYYY h:mm A",
@@ -59,7 +57,12 @@ const DEFAULT_SETTINGS: VoiceInboxSettings = {
   lowConfMinWpm: 15,
 };
 
-// ---------------- Minimal environment preflight ----------------
+// =========================
+// Environment Checks
+// =========================
+
+type SupportStatus = { supported: boolean; reason?: string };
+let SUPPORT: SupportStatus = { supported: true };
 
 function envSupported(): SupportStatus {
   const hasMedia = !!(navigator.mediaDevices && navigator.mediaDevices.getUserMedia);
@@ -69,8 +72,10 @@ function envSupported(): SupportStatus {
   return { supported: true };
 }
 
-// ---------------- ASR (transformers, SAB-free WASM) ----------------
-// Lazily loaded to avoid heavy startup
+// =========================
+// STT (Xenova/transformers) - WASM only, no SAB
+// =========================
+
 let asrPipeline: any = null;
 
 async function getASRPipeline(
@@ -81,11 +86,9 @@ async function getASRPipeline(
 
   const { pipeline, env } = await import("@xenova/transformers");
 
-  // Cache models in browser storage
   env.useBrowserCache = true;
   env.allowLocalModels = false;
 
-  // Force plain WASM (no threads / no SIMD / no proxy worker) => no SharedArrayBuffer
   if (env.backends?.onnx?.wasm) {
     env.backends.onnx.wasm.proxy = false;
     env.backends.onnx.wasm.numThreads = 1;
@@ -106,7 +109,10 @@ async function getASRPipeline(
   return asrPipeline;
 }
 
-// Decode Blob → mono Float32 PCM @ 16kHz (browser-native resampler)
+// =========================
+/** Decode Blob → mono Float32 PCM @ 16kHz */
+// =========================
+
 async function decodeAndResampleTo16k(blob: Blob): Promise<Float32Array> {
   const arr = await blob.arrayBuffer();
   const AC = (window.AudioContext || (window as any).webkitAudioContext) as typeof AudioContext;
@@ -122,13 +128,11 @@ async function decodeAndResampleTo16k(blob: Blob): Promise<Float32Array> {
     for (let i = 0; i < frames; i++) mixed[i] += data[i] / channels;
   }
 
-  // If already 16kHz, return
   if (src.sampleRate === 16000) {
     ac.close();
     return mixed;
   }
 
-  // Resample using OfflineAudioContext
   const durationSec = src.duration;
   const targetFrames = Math.ceil(16000 * durationSec);
   const OAC = (window as any).OfflineAudioContext || (window as any).webkitOfflineAudioContext;
@@ -145,13 +149,16 @@ async function decodeAndResampleTo16k(blob: Blob): Promise<Float32Array> {
   return out;
 }
 
-// Encode Float32 PCM (mono) → MP3 (lamejs)
+// =========================
+/** Encode Float32 PCM → MP3 using lamejs */
+// =========================
+
 async function encodeMp3FromPCM(pcm: Float32Array, sampleRate = 16000): Promise<Blob> {
-  const lame: any = await import("lamejs");
-  const Mp3Encoder = lame.Mp3Encoder as any;
+  const lamejs = await import("lamejs");
+  const Mp3Encoder = (lamejs as any).Mp3Encoder as any;
   const encoder = new Mp3Encoder(1, sampleRate, 128); // mono, 16kHz, 128 kbps
 
-  // Convert Float32 [-1,1] → Int16
+  // Float32 [-1,1] -> Int16
   const pcm16 = new Int16Array(pcm.length);
   for (let i = 0; i < pcm.length; i++) {
     let s = Math.max(-1, Math.min(1, pcm[i]));
@@ -170,7 +177,10 @@ async function encodeMp3FromPCM(pcm: Float32Array, sampleRate = 16000): Promise<
   return new Blob(chunks, { type: "audio/mpeg" });
 }
 
-// Enumerate input devices (labels only appear AFTER at least one mic permission grant)
+// =========================
+/** Media devices helpers */
+// =========================
+
 async function listInputDevices(): Promise<MediaDeviceInfo[]> {
   try {
     const all = await navigator.mediaDevices.enumerateDevices();
@@ -180,37 +190,85 @@ async function listInputDevices(): Promise<MediaDeviceInfo[]> {
   }
 }
 
-// Request permission explicitly so we get labels for device selection UI
 async function ensureMicPermission(deviceId?: string): Promise<MediaStream> {
-  const constraints: MediaStreamConstraints = {
-    audio: deviceId
-      ? {
-          deviceId: { exact: deviceId },
-          echoCancellation: true,
-          noiseSuppression: true,
-          autoGainControl: true,
-          channelCount: 1,
-        }
-      : {
-          echoCancellation: true,
-          noiseSuppression: true,
-          autoGainControl: true,
-          channelCount: 1,
-        },
-    video: false,
+  const base: MediaTrackConstraints = {
+    // Use "ideal" so devices that don't support these won't fail the whole request
+    echoCancellation: { ideal: true },
+    noiseSuppression: { ideal: true },
+    autoGainControl: { ideal: true },
+    channelCount: { ideal: 1 },
   };
-  return navigator.mediaDevices.getUserMedia(constraints);
+
+  // Try the chosen device strictly first
+  if (deviceId) {
+    try {
+      return await navigator.mediaDevices.getUserMedia({
+        audio: { ...base, deviceId: { exact: deviceId } },
+        video: false,
+      });
+    } catch (e: any) {
+      // If that fails (e.g., OverconstrainedError), fall back to "ideal" deviceId,
+      // then finally to system default.
+      try {
+        return await navigator.mediaDevices.getUserMedia({
+          audio: { ...base, deviceId: { ideal: deviceId } },
+          video: false,
+        });
+      } catch {}
+    }
+  }
+
+  // Default device (no deviceId constraint)
+  return navigator.mediaDevices.getUserMedia({ audio: base, video: false });
 }
 
-// ---------------- Plugin ----------------
 
-export default class VoiceInboxPlugin extends Plugin {
-  settings: VoiceInboxSettings;
+// =========================
+// Helper: save audio per settings (with MP3→WebM fallback)
+// =========================
+
+async function saveAudioPerSettings(
+  plugin: { saveAudioBinary: (buf: ArrayBuffer, when: Date, ext: "mp3"|"webm") => Promise<string>;
+            settings: ObbyVoiceSettings },
+  pcm16k: Float32Array,         // already computed for STT
+  webmBlob: Blob,               // original recording
+  when: Date
+): Promise<{ path: string | null; used: "mp3" | "webm" | null }> {
+  if (!plugin.settings.saveAudioFile) return { path: null, used: null };
+
+  if (plugin.settings.audioFormat === "mp3") {
+    try {
+      const mp3Blob = await encodeMp3FromPCM(pcm16k, 16000);
+      const path = await plugin.saveAudioBinary(await mp3Blob.arrayBuffer(), when, "mp3");
+      console.log("[Obby Voice] Saved MP3:", path);
+      return { path, used: "mp3" };
+    } catch (err) {
+      console.warn("[Obby Voice] MP3 encode failed, saving WebM instead:", err);
+      new Notice("MP3 encode failed — saved WebM instead.");
+    }
+  }
+  const path = await plugin.saveAudioBinary(await webmBlob.arrayBuffer(), when, "webm");
+  console.log("[Obby Voice] Saved WebM:", path);
+  return { path, used: "webm" };
+}
+
+// =========================
+// Plugin
+// =========================
+
+export default class ObbyVoicePlugin extends Plugin {
+  settings: ObbyVoiceSettings;
   private activeModal?: RecordModal;
 
   async onload() {
-    this.settings = Object.assign({}, DEFAULT_SETTINGS, await this.loadData());
+    await this.loadSettings();
     SUPPORT = envSupported();
+
+    // if (!this.app.isMobile) {
+    //   this.addRibbonIcon("microphone", "Record voice note to Inbox", () => this.openRecorder());
+    //   const sb = this.addStatusBarItem();
+    //   sb.setText("Obby Voice: Cmd Palette → Record");
+    // }
 
     this.addCommand({
       id: "record-voice-note-to-inbox",
@@ -222,21 +280,8 @@ export default class VoiceInboxPlugin extends Plugin {
       },
     });
 
-    this.addCommand({
-      id: "obby-voice-support-info",
-      name: "Obby Voice: environment support info",
-      callback: () =>
-        new Notice(SUPPORT.supported ? "Ready." : `Not supported: ${SUPPORT.reason || "unknown"}`),
-    });
-
-    if (!this.app.isMobile) {
-      this.addRibbonIcon("microphone", "Record voice note to Inbox", () => this.openRecorder());
-      const sb = this.addStatusBarItem();
-      sb.setText("Obby Voice: Cmd Palette → Record");
-    }
-
-    this.addSettingTab(new VoiceInboxSettingsTab(this.app, this));
-    new Notice("Obby Voice loaded");
+    this.addSettingTab(new ObbyVoiceSettingsTab(this.app, this));
+    new Notice(`Obby Voice loaded`);
   }
 
   onunload() {
@@ -250,9 +295,15 @@ export default class VoiceInboxPlugin extends Plugin {
     m.openAndAutoStart();
   }
 
-  async saveSettings() { await this.saveData(this.settings); }
+  // -------- Settings IO --------
+  async loadSettings() {
+    this.settings = Object.assign({}, DEFAULT_SETTINGS, await this.loadData());
+  }
+  async saveSettings() {
+    await this.saveData(this.settings);
+  }
 
-  // Append transcript line to the day’s inbox (use captured time)
+  // -------- Note/Audio helpers --------
   async appendToDailyInbox(line: string, when = new Date()) {
     const m = moment(when);
     const folderPath = normalizePath(this.settings.inboxFolder || "Inbox");
@@ -269,7 +320,6 @@ export default class VoiceInboxPlugin extends Plugin {
     await this.app.vault.append(file, (await this.needsLeadingNewline(file)) ? `\n${text}` : text);
   }
 
-  // Save binary buffer into (inboxFolder[/audioSubfolder]) with chosen extension
   async saveAudioBinary(buf: ArrayBuffer, when: Date, ext: "mp3" | "webm"): Promise<string> {
     const root = normalizePath(this.settings.inboxFolder || "Inbox");
     const sub = (this.settings.audioSubfolder || "").trim();
@@ -283,7 +333,7 @@ export default class VoiceInboxPlugin extends Plugin {
       path = normalizePath(`${dir}/voice-${stamp}-${i++}.${ext}`);
     }
     await this.app.vault.createBinary(path, buf);
-    return path; // vault-relative
+    return path;
   }
 
   private async needsLeadingNewline(file: TFile): Promise<boolean> {
@@ -298,14 +348,16 @@ export default class VoiceInboxPlugin extends Plugin {
   }
 }
 
-// ---------------- Record Modal ----------------
+// =========================
+// Record Modal
+// =========================
 
 class RecordModal extends Modal {
-  private plugin: VoiceInboxPlugin;
+  private plugin: ObbyVoicePlugin;
   private stream?: MediaStream;
   private recorder?: MediaRecorder;
   private chunks: BlobPart[] = [];
-  private state: "idle" | "recording" | "transcribing" = "idle";
+  private state: "idle" | "recording" | "transcribing" | "finished" = "idle";
   private btn!: HTMLButtonElement;
   private note!: HTMLElement;
   private startedAtMs = 0;
@@ -323,7 +375,14 @@ class RecordModal extends Modal {
   // mobile tip
   private mobileTipEl!: HTMLElement;
 
-  constructor(app: App, plugin: VoiceInboxPlugin) {
+  // results UI
+  private resultWrap!: HTMLDivElement;
+  private transcriptEl!: HTMLTextAreaElement;
+  private audioEl!: HTMLAudioElement;
+  private savedPathEl!: HTMLDivElement;
+  private objectURL?: string;
+
+  constructor(app: App, plugin: ObbyVoicePlugin) {
     super(app);
     this.plugin = plugin;
   }
@@ -334,7 +393,7 @@ class RecordModal extends Modal {
 
     contentEl.createEl("h3", { text: "Obby Voice" });
 
-    // Canvas for simple waveform/bars
+    // Canvas for waveform/bars
     this.canvas = contentEl.createEl("canvas");
     this.canvas.width = 360;
     this.canvas.height = 70;
@@ -366,12 +425,38 @@ class RecordModal extends Modal {
     this.mobileTipEl.style.opacity = "0.7";
     this.mobileTipEl.style.marginTop = "6px";
     if ((this.app as any).isMobile) {
-      this.mobileTipEl.textContent = "Tip: keep your screen on while recording on mobile (iOS/Android may pause otherwise).";
+      this.mobileTipEl.textContent =
+        "Tip: keep your screen on while recording on mobile (iOS/Android may pause otherwise).";
+    } else {
+      this.mobileTipEl.textContent = "";
     }
 
-    const small = contentEl.createEl("div");
-    small.setCssStyles({ opacity: "0.7", marginTop: "8px" });
-    small.setText(`ASR model: ${this.plugin.settings.modelId} (first run downloads & caches)`);
+    // Results area (hidden until finished)
+    this.resultWrap = contentEl.createDiv({ cls: "obby-voice-results" });
+    this.resultWrap.style.marginTop = "12px";
+    this.resultWrap.style.display = "none";
+
+    // transcript textarea
+    const tlabel = this.resultWrap.createEl("div", { text: "Transcription (editable):" });
+    tlabel.style.margin = "6px 0 4px";
+
+    this.transcriptEl = this.resultWrap.createEl("textarea");
+    this.transcriptEl.rows = 5;
+    this.transcriptEl.style.width = "100%";
+    this.transcriptEl.style.resize = "vertical";
+
+    // audio player
+    const alabel = this.resultWrap.createEl("div", { text: "Recording:" });
+    alabel.style.margin = "10px 0 4px";
+    this.audioEl = this.resultWrap.createEl("audio");
+    this.audioEl.controls = true;
+    this.audioEl.style.width = "100%";
+
+    // saved path
+    this.savedPathEl = this.resultWrap.createDiv();
+    this.savedPathEl.style.opacity = "0.7";
+    this.savedPathEl.style.marginTop = "6px";
+
     contentEl.setCssStyles({ padding: "16px" });
   }
 
@@ -406,7 +491,7 @@ class RecordModal extends Modal {
         return;
       }
 
-      // Request mic with user's chosen device (if any)
+      // Request mic with user's chosen device
       let stream: MediaStream | null = null;
       try {
         stream = await ensureMicPermission(this.plugin.settings.inputDeviceId || undefined);
@@ -423,9 +508,12 @@ class RecordModal extends Modal {
 
       this.stream = stream;
 
-      // Show which device we actually got
+      // Device details
       const [track] = this.stream.getAudioTracks();
       const settings = track.getSettings?.() || {};
+	  const actualId = (settings as any).deviceId; // not standardized everywhere, but present in Chromium/Electron
+	  console.log("[Obby Voice] Using deviceId:", actualId, "label:", track.label);
+
       this.deviceLabel = track.label || (settings.deviceId ? `(device ${settings.deviceId})` : "unknown");
       const details = [
         this.deviceLabel,
@@ -448,12 +536,10 @@ class RecordModal extends Modal {
       this.recorder = new MediaRecorder(this.stream, mt ? { mimeType: mt } : undefined);
       this.chunks = [];
 
-      // Collect chunks
       this.recorder.addEventListener("dataavailable", (e: BlobEvent) => {
         if (e.data && e.data.size > 0) this.chunks.push(e.data);
       });
 
-      // Mute notices
       if (track.muted) {
         new Notice("Warning: selected microphone track is muted (no signal).");
       }
@@ -462,14 +548,14 @@ class RecordModal extends Modal {
 
       this.startedAtMs = Date.now();
 
-      // Use a timeslice so chunks flush periodically (more reliable)
+      // Use timeslice to flush chunks
       this.recorder.start(1000);
 
       this.state = "recording";
       this.note.setText(`Recording from: ${details}`);
       this.btn.setText("Stop");
 
-      // Warm up model in background (first run download)
+      // Warm model (download on first run)
       try {
         await getASRPipeline(this.plugin.settings.modelId, (msg, pct) => {
           this.note.innerText = pct !== undefined
@@ -478,14 +564,14 @@ class RecordModal extends Modal {
         });
         if (this.state === "recording") this.note.setText(`Recording from: ${details}`);
       } catch {
-        // We'll fall back to audio save if load fails later
+        // ignore
       }
     } catch (e: any) {
       new Notice(`Mic error: ${e?.message || e}`);
     }
   }
 
-  // Visualization (simple bars/wave + silence detector)
+  // Visualization (wave + bars + silence detector)
   private startViz() {
     const ctx = this.canvas.getContext("2d");
     if (!ctx || !this.analyser) return;
@@ -500,15 +586,15 @@ class RecordModal extends Modal {
     const buf = new Uint8Array(this.analyser.frequencyBinCount);
 
     const draw = () => {
-      if (!this.analyser) return; // stopped
+      if (!this.analyser) return;
       this.analyser.getByteTimeDomainData(buf);
 
-      // Compute average deviation from 128 (midline) as rough amplitude
+      // crude amplitude
       let sum = 0;
       for (let i = 0; i < buf.length; i++) sum += Math.abs(buf[i] - 128);
       const avg = sum / buf.length;
 
-      // Silence detector: if avg < 1.5 for ~120 frames (~2s at 60fps), warn
+      // silence warning (~2s)
       if (avg < 1.5) this.silenceFrames++; else this.silenceFrames = 0;
       if (this.silenceFrames > 120) {
         this.warningEl.textContent = "⚠️ No audio detected — check mic/input device or permissions.";
@@ -516,31 +602,30 @@ class RecordModal extends Modal {
         this.warningEl.textContent = "";
       }
 
-      // Draw background
+      // draw
       ctx.clearRect(0, 0, cssW, cssH);
 
-      // Draw subtle grid baseline
+      // baseline
       ctx.globalAlpha = 0.08;
       ctx.fillStyle = "currentColor";
       const mid = cssH / 2;
       ctx.fillRect(0, mid, cssW, 1);
       ctx.globalAlpha = 1;
 
-      // Draw waveform as thin line + a few vertical bars
-      // Wave
+      // waveform
       ctx.beginPath();
       ctx.lineWidth = 2;
       ctx.strokeStyle = "var(--text-accent)";
       const step = Math.max(1, Math.floor(buf.length / cssW));
       for (let x = 0, i = 0; x < cssW; x++, i += step) {
-        const v = (buf[Math.min(i, buf.length - 1)] - 128) / 128; // -1..1
+        const v = (buf[Math.min(i, buf.length - 1)] - 128) / 128;
         const y = mid + v * (cssH * 0.38);
         if (x === 0) ctx.moveTo(x, y);
         else ctx.lineTo(x, y);
       }
       ctx.stroke();
 
-      // Bars (5 bars across)
+      // bars
       const bars = 5;
       const barGap = cssW / bars;
       for (let b = 0; b < bars; b++) {
@@ -574,14 +659,12 @@ class RecordModal extends Modal {
     this.ac = undefined;
   }
 
-  // Wait until the recorder fully stops and the final chunk has been delivered
+  // finalize MediaRecorder → Blob
   private async finalizeRecording(): Promise<Blob> {
     if (!this.recorder) throw new Error("No recorder");
-
     const rec = this.recorder;
 
     try { rec.requestData(); } catch {}
-
     await new Promise<void>((resolve) => {
       rec.addEventListener("stop", () => resolve(), { once: true });
       if (rec.state !== "inactive") rec.stop();
@@ -605,49 +688,36 @@ class RecordModal extends Modal {
     const durationMs = Math.max(0, endedAtMs - this.startedAtMs);
     const when = new Date(endedAtMs);
 
-    // If somehow still empty, bail to audio-save path with a notice
     if (!webmBlob || webmBlob.size === 0) {
-      const emptyBuf = new ArrayBuffer(0);
-      if (this.plugin.settings.saveAudioFile) {
-        // Save placeholder with chosen extension
-        const ext = this.plugin.settings.audioFormat;
-        await this.plugin.saveAudioBinary(emptyBuf, when, ext);
-      }
       await this.plugin.appendToDailyInbox(`(recording error)`, when);
       new Notice("Recording produced empty audio.");
       this.close();
       return;
     }
 
+    // Make a local object URL for playback right away (works even if not saved)
+    try { if (this.objectURL) URL.revokeObjectURL(this.objectURL); } catch {}
+    this.objectURL = URL.createObjectURL(webmBlob);
+
     try {
       this.note.setText("Processing audio…");
       const pcm16k = await decodeAndResampleTo16k(webmBlob);
 
-      // Get pipeline (download on first run)
+      // STT
       const asr = await getASRPipeline(this.plugin.settings.modelId, (msg, pct) => {
         this.note.innerText = pct !== undefined ? `Downloading model… ${pct}%` : String(msg);
       });
 
-      // Transcribe
       this.note.setText("Transcribing…");
       const out = await asr(pcm16k, { sampling_rate: 16000 });
       const text: string = (out?.text || "").trim();
 
-      // Optionally save audio file (MP3 by default, encoded from PCM we already computed)
-      let savedPath: string | null = null;
-      if (this.plugin.settings.saveAudioFile) {
-        if (this.plugin.settings.audioFormat === "mp3") {
-          const mp3Blob = await encodeMp3FromPCM(pcm16k, 16000);
-          const buf = await mp3Blob.arrayBuffer();
-          savedPath = await this.plugin.saveAudioBinary(buf, when, "mp3");
-        } else {
-          // Save original webm
-          const buf = await webmBlob.arrayBuffer();
-          savedPath = await this.plugin.saveAudioBinary(buf, when, "webm");
-        }
-      }
+      // Save per settings (MP3/WebM/none)
+      const saved = await saveAudioPerSettings(this.plugin, pcm16k, webmBlob, when);
+      const savedPath = saved.path;
+      const audioLink = savedPath ? ` [[${savedPath}|audio]]` : "";
 
-      // Heuristic confidence (still useful for note text)
+      // Confidence heuristic
       const onlyPunct = text.replace(/[^\p{L}\p{N}]+/gu, "").length === 0;
       const words = text ? text.split(/\s+/).length : 0;
       const wpm = durationMs > 0 ? Math.round((words / (durationMs / 60000))) : 0;
@@ -655,41 +725,87 @@ class RecordModal extends Modal {
       const lowWpm = longEnough && wpm > 0 && wpm < this.plugin.settings.lowConfMinWpm;
       const looksBad = !text || onlyPunct || lowWpm;
 
-      const audioLink = savedPath ? ` [[${savedPath}|audio]]` : "";
-
+      // Append to daily note (immediately)
       if (this.plugin.settings.saveAudioOnLowConfidence && looksBad) {
         const line = text
           ? `(low confidence)${audioLink} — tentative: ${text}`
           : `(no speech detected)${audioLink}`;
         await this.plugin.appendToDailyInbox(line, when);
-        new Notice(savedPath ? "Saved audio and note." : "Saved note.");
       } else {
         await this.plugin.appendToDailyInbox((text || "(no speech detected)") + audioLink, when);
-        new Notice(savedPath ? "Saved audio and note." : "Saved note.");
       }
 
-      this.close();
+      // --- NEW UX: show transcript + audio in the popup ---
+      this.showResultsUI({
+        transcript: text || "(no speech detected)",
+        objectUrl: this.objectURL,
+        savedPath,
+        usedFormat: saved.used,
+      });
+
+      new Notice(savedPath ? "Saved audio and note." : "Saved note.");
+      this.state = "finished";
+      this.btn.setText("Close");
+      this.btn.onclick = () => this.close();
+
     } catch (e: any) {
+      // Try to at least save original audio if configured
       try {
-        if (this.plugin.settings.saveAudioOnLowConfidence && this.plugin.settings.saveAudioFile) {
-          // Save original webm (most reliable) if MP3 encode/STT threw
-          const buf = await webmBlob.arrayBuffer();
-          const path = await this.plugin.saveAudioBinary(buf, when, "webm");
-          await this.plugin.appendToDailyInbox(`(transcription error) [[${path}|audio]]`, when);
+        const saved = await saveAudioPerSettings(this.plugin, new Float32Array(0), webmBlob, when);
+        if (saved.path) {
+          await this.plugin.appendToDailyInbox(`(transcription error) [[${saved.path}|audio]]`, when);
+          // Show results UI with playback even on error
+          this.showResultsUI({
+            transcript: "(transcription error)",
+            objectUrl: this.objectURL,
+            savedPath: saved.path,
+            usedFormat: saved.used,
+          });
+          this.state = "finished";
+          this.btn.setText("Close");
+          this.btn.onclick = () => this.close();
           new Notice("Transcription failed; audio saved and noted in Inbox.");
-        } else {
-          await this.plugin.appendToDailyInbox(`(transcription error)`, when);
-          new Notice(`Transcription failed: ${e?.message || e}`);
+          return;
         }
-      } catch (saveErr: any) {
-        new Notice(`Transcription failed and save also failed: ${saveErr?.message || saveErr}`);
-      } finally {
-        this.close();
-      }
+      } catch {}
+      await this.plugin.appendToDailyInbox(`(transcription error)`, when);
+      this.showResultsUI({
+        transcript: "(transcription error)",
+        objectUrl: this.objectURL,
+        savedPath: null,
+        usedFormat: null,
+      });
+      this.state = "finished";
+      this.btn.setText("Close");
+      this.btn.onclick = () => this.close();
+      new Notice(`Transcription failed: ${e?.message || e}`);
     }
   }
 
+  private showResultsUI(opts: {
+    transcript: string;
+    objectUrl: string;
+    savedPath: string | null;
+    usedFormat: "mp3" | "webm" | null;
+  }) {
+    // reveal area
+    this.resultWrap.style.display = "";
+    // fill
+    this.transcriptEl.value = opts.transcript;
+    this.audioEl.src = opts.objectUrl;
+    this.audioEl.playbackRate = 1;
+    // saved path text
+    if (opts.savedPath) {
+      this.savedPathEl.textContent = `Saved: ${opts.savedPath} (${opts.usedFormat?.toUpperCase()})`;
+    } else {
+      this.savedPathEl.textContent = `Audio not saved (disabled in settings).`;
+    }
+    // update header note
+    this.note.setText(this.deviceLabel ? `From: ${this.deviceLabel}` : "Finished");
+  }
+
   onClose() {
+    try { if (this.objectURL) URL.revokeObjectURL(this.objectURL); } catch {}
     this.stopViz();
     this.stream?.getTracks().forEach((t) => t.stop());
     this.contentEl.empty();
@@ -697,12 +813,15 @@ class RecordModal extends Modal {
   }
 }
 
-// ---------------- Settings UI ----------------
+// =========================
+// Settings Tab UI
+// =========================
 
-class VoiceInboxSettingsTab extends PluginSettingTab {
-  plugin: VoiceInboxPlugin;
+class ObbyVoiceSettingsTab extends PluginSettingTab {
+  plugin: ObbyVoicePlugin;
+  
 
-  constructor(app: App, plugin: VoiceInboxPlugin) {
+  constructor(app: App, plugin: ObbyVoicePlugin) {
     super(app, plugin);
     this.plugin = plugin;
   }
@@ -710,8 +829,10 @@ class VoiceInboxSettingsTab extends PluginSettingTab {
   async display() {
     const { containerEl } = this;
     containerEl.empty();
+
     containerEl.createEl("h3", { text: "Obby Voice settings" });
 
+    // Inbox folder
     new Setting(containerEl)
       .setName("Inbox folder")
       .setDesc("Per-day files will be created here (e.g., 2025-08-17.md).")
@@ -725,6 +846,7 @@ class VoiceInboxSettingsTab extends PluginSettingTab {
           }),
       );
 
+    // Filename date format
     new Setting(containerEl)
       .setName("Filename date format")
       .setDesc("Moment format for the daily file (default: YYYY-MM-DD).")
@@ -738,6 +860,7 @@ class VoiceInboxSettingsTab extends PluginSettingTab {
           }),
       );
 
+    // Entry prefix format
     new Setting(containerEl)
       .setName("Entry timestamp format")
       .setDesc("Moment format for each line prefix (default: MMM D, YYYY h:mm A).")
@@ -751,6 +874,7 @@ class VoiceInboxSettingsTab extends PluginSettingTab {
           }),
       );
 
+    // STT model
     new Setting(containerEl)
       .setName("ASR model (HuggingFace id)")
       .setDesc("Examples: Xenova/whisper-tiny.en, Xenova/whisper-base.en")
@@ -764,7 +888,7 @@ class VoiceInboxSettingsTab extends PluginSettingTab {
           }),
       );
 
-    // Mic selection UI
+    // Microphone selection
     containerEl.createEl("h4", { text: "Microphone" });
     const micSetting = new Setting(containerEl)
       .setName("Input device")
@@ -780,34 +904,34 @@ class VoiceInboxSettingsTab extends PluginSettingTab {
       });
     });
 
-    // Try to get labels (may prompt)
-    try { await ensureMicPermission(this.plugin.settings.inputDeviceId || undefined); } catch {}
-    const devices = await listInputDevices();
+    // Try to prompt for permission so labels appear
+	let warm: MediaStream | null = null;
+	try {
+	// prime permission so labels appear
+	warm = await ensureMicPermission(this.plugin.settings.inputDeviceId || undefined);
+	} catch {
+	// ignore
+	} finally {
+	// always release the mic
+	try { warm?.getTracks().forEach(t => t.stop()); } catch {}
+	}
+	const devices = await listInputDevices();
 
-    // Refill compatibly across Obsidian versions
-    const dd = dropdown as unknown as DropdownComponent & {
-      addOptions?: (opts: Record<string, string>) => void;
-      addOption?: (value: string, label: string) => void;
-      selectEl?: HTMLSelectElement;
-    };
 
-    // clear
-    if (dd.selectEl?.replaceChildren) dd.selectEl.replaceChildren();
-    else if (dd.selectEl) dd.selectEl.innerHTML = "";
-
-    // add system default first
-    if (dd.addOptions) dd.addOptions({ "": "(system default)" });
-    else if (dd.addOption) dd.addOption("", "(system default)");
-    else dd.selectEl?.add(new Option("(system default)", ""));
-
-    // add devices
-    for (const dev of devices) {
-      const label = dev.label || `(device ${dev.deviceId})`;
-      if (dd.addOptions) dd.addOptions({ [dev.deviceId]: label });
-      else if (dd.addOption) dd.addOption(dev.deviceId, label);
-      else dd.selectEl?.add(new Option(label, dev.deviceId));
+    // Cross-version safe population via raw select
+    const select = (dropdown as any).selectEl as HTMLSelectElement | undefined;
+    if (select) {
+      while (select.firstChild) select.removeChild(select.firstChild);
+      select.append(new Option("(system default)", ""));
+      for (const dev of devices) {
+        const label = dev.label || `(device ${dev.deviceId})`;
+        select.append(new Option(label, dev.deviceId));
+      }
+      const want = this.plugin.settings.inputDeviceId || "";
+      const exists = Array.from(select.options).some(o => o.value === want);
+      select.value = exists ? want : "";
+      select.dispatchEvent(new Event("change", { bubbles: true }));
     }
-    dropdown.setValue(this.plugin.settings.inputDeviceId || "");
 
     // Audio saving
     containerEl.createEl("h4", { text: "Audio saving" });
@@ -849,7 +973,7 @@ class VoiceInboxSettingsTab extends PluginSettingTab {
           }),
       );
 
-    // Confidence thresholds (still useful to flag doubtful output)
+    // Low-confidence
     containerEl.createEl("h4", { text: "Low-confidence behavior" });
 
     new Setting(containerEl)
@@ -891,4 +1015,38 @@ class VoiceInboxSettingsTab extends PluginSettingTab {
           }),
       );
   }
+}
+
+
+
+class SelectInputDeviceModal extends Modal {
+	constructor(app: App, private plugin: ObbyVoicePlugin, private devices: MediaDeviceInfo[]) {
+		super(app);
+	}
+
+	onOpen() {
+		const { contentEl } = this;
+
+		new Setting(contentEl).setName('Select audio input device').setHeading();
+		const dropdown = contentEl.createEl('select');
+		this.devices.forEach(device => {
+			const option = dropdown.createEl('option');
+			option.value = device.deviceId;
+			option.text = device.label || `Device ${device.deviceId}`;
+		});
+
+		const button = contentEl.createEl('button', { text: 'Select' });
+		button.onclick = async () => {
+			const selectedDeviceId = dropdown.value;
+			this.plugin.settings.audioDeviceId = selectedDeviceId;
+			await this.plugin.saveSettings();
+			new Notice(`Selected audio device: ${dropdown.selectedOptions[0].text}`);
+			this.close();
+		};
+	}
+
+	onClose() {
+		const { contentEl } = this;
+		contentEl.empty();
+	}
 }
