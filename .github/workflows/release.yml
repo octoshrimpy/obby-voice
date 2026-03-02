@@ -3,19 +3,22 @@ name: Release Obsidian Plugin
 on:
   push:
     tags:
-      - "*"
-  workflow_dispatch:
+      - "*.*.*"
+      - "v*.*.*"
 
 permissions:
   contents: write
 
 jobs:
   release:
+    if: startsWith(github.ref, 'refs/tags/')
     runs-on: ubuntu-latest
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Setup Node
         uses: actions/setup-node@v4
@@ -30,9 +33,9 @@ jobs:
         run: npm run build
 
       - name: Verify tag matches manifest version
-        if: startsWith(github.ref, 'refs/tags/')
         run: |
           TAG="${GITHUB_REF#refs/tags/}"
+          TAG="${TAG#v}"
           VERSION="$(node -p "require('./manifest.json').version")"
           if [ "$TAG" != "$VERSION" ]; then
             echo "Tag ($TAG) does not match manifest version ($VERSION)."
@@ -42,7 +45,9 @@ jobs:
       - name: Create GitHub release
         uses: softprops/action-gh-release@v2
         with:
+          name: ${{ github.ref_name }}
           tag_name: ${{ github.ref_name }}
+          fail_on_unmatched_files: true
           files: |
             manifest.json
             main.js
