@@ -4,6 +4,7 @@ import type { ObbyVoiceSettings } from "../types";
 import { listInputDevices } from "../audio";
 import { getASRPipeline } from "../asr";
 import { ensureHFModelInVault } from "../storage";
+import { isMobileDevice } from "../env";
 
 export class ObbyVoiceSettingsTab extends PluginSettingTab {
   constructor(
@@ -134,10 +135,13 @@ export class ObbyVoiceSettingsTab extends PluginSettingTab {
               throw new Error(`Invalid model_type in config.json: ${cfg?.model_type ?? "unknown"}`);
             }
 
-            // Warm/verify pipeline
-            await getASRPipeline(modelId, onProgress);
-
-            setModelStatus(`Ready ✓  (${fileCount} files in ${modelDir})`);
+            // Warm/verify pipeline (skip on mobile to avoid aggressive memory spikes).
+            if (!isMobileDevice()) {
+              await getASRPipeline(modelId, onProgress);
+              setModelStatus(`Ready ✓  (${fileCount} files in ${modelDir})`);
+            } else {
+              setModelStatus(`Files ready ✓  (${fileCount} files in ${modelDir}); warm-up skipped on mobile.`);
+            }
           } catch (err: any) {
             const hint =
               /Unsupported model type: whisper/i.test(String(err?.message))

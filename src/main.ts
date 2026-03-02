@@ -1,6 +1,6 @@
 import { Notice, Plugin } from "obsidian";
 import { DEFAULT_SETTINGS, ObbyVoiceSettings, SupportStatus } from "./types";
-import { envSupported } from "./env";
+import { envSupported, isMobileDevice } from "./env";
 import { getASRPipeline, setWasmPath, setTransformersPath } from "./asr";
 import { RecordModal } from "./ui/RecordModal";
 import { ObbyVoiceSettingsTab } from "./ui/SettingsTab";
@@ -54,7 +54,7 @@ export default class ObbyVoicePlugin extends Plugin {
         setWasmPath(res("vendor/wasm/ort-wasm.wasm").replace(/\/ort-wasm\.wasm.*$/, "/"));
 
         // Warm up the model in the background so first recording has no cold-start
-        if (this.support.supported) {
+        if (this.support.supported && !isMobileDevice()) {
             getASRPipeline(this.settings.modelId).catch(() => { /* silent */ });
         }
     }

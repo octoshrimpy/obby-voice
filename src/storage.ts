@@ -135,15 +135,24 @@ export async function ensureHFModelInVault(
     "config.json",
     "preprocessor_config.json",
     "tokenizer.json",
+    "tokenizer_config.json",
+    "special_tokens_map.json",
+    "generation_config.json",
     "vocabulary.json",
     "merges.txt",
   ]);
 
-  const files: string[] = [];
-  for (const s of meta.siblings as Array<{ rfilename: string }>) {
-    const f = s.rfilename;
-    if (f.startsWith("onnx/") || wanted.has(f)) files.push(f);
-  }
+  const siblings = (meta.siblings as Array<{ rfilename: string }>).map((s) => s.rfilename);
+  const onnxAll = siblings.filter((f) => f.startsWith("onnx/"));
+  const onnxQuantized = onnxAll.filter((f) => /quantized|q8|int8/i.test(f));
+  const onnxSelected = onnxQuantized.length > 0 ? onnxQuantized : onnxAll;
+
+  const files = Array.from(
+    new Set([
+      ...onnxSelected,
+      ...siblings.filter((f) => wanted.has(f)),
+    ])
+  );
   if (files.length === 0) throw new Error("No ONNX/Whisper assets found in repo.");
 
   // Create base folder structure: <baseDir>/<repoId>/
@@ -171,7 +180,10 @@ export async function ensureHFModelInVault(
     }
     const url = `https://huggingface.co/${repoId}/resolve/main/${rel}`;
     const resp = await requestUrl({ url, headers: { Accept: "application/octet-stream" } });
-    const buf: ArrayBuffer = (resp as any).arrayBuffer ?? new TextEncoder().encode(resp.text ?? "").buffer;
+    const buf = (resp as any).arrayBuffer as ArrayBuffer | undefined;
+    if (!buf) {
+      throw new Error(`Download failed for ${rel}: binary payload unavailable.`);
+    }
     await app.vault.createBinary(dest, buf);
     done++;
     onProgress?.(`Downloaded ${rel}`, Math.round((done / files.length) * 100));

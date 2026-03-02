@@ -7,3 +7,8 @@ export function envSupported(): SupportStatus {
   if (!hasAudioCtx) return { supported: false, reason: "No AudioContext" };
   return { supported: true };
 }
+
+export function isMobileDevice(): boolean {
+  const ua = navigator.userAgent || "";
+  return /Android|iPhone|iPad|iPod|Mobile/i.test(ua);
+}
