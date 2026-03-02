@@ -1,17 +1,18 @@
 name: Release Obsidian Plugin
 
 on:
-  push:
-    tags:
-      - "*.*.*"
-      - "v*.*.*"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Release version (e.g. 0.1.37). Leave blank to use manifest.json version."
+        required: false
+        type: string
 
 permissions:
   contents: write
 
 jobs:
   release:
-    if: startsWith(github.ref, 'refs/tags/')
     runs-on: ubuntu-latest
 
     steps:
@@ -32,21 +33,43 @@ jobs:
       - name: Build plugin
         run: npm run build
 
-      - name: Verify tag matches manifest version
+      - name: Resolve release version
+        id: version
         run: |
-          TAG="${GITHUB_REF#refs/tags/}"
-          TAG="${TAG#v}"
-          VERSION="$(node -p "require('./manifest.json').version")"
-          if [ "$TAG" != "$VERSION" ]; then
-            echo "Tag ($TAG) does not match manifest version ($VERSION)."
+          INPUT_VERSION="${{ github.event.inputs.version }}"
+          MANIFEST_VERSION="$(node -p "require('./manifest.json').version")"
+          if [ -n "$INPUT_VERSION" ]; then
+            VERSION="$INPUT_VERSION"
+          else
+            VERSION="$MANIFEST_VERSION"
+          fi
+          if [ "$VERSION" != "$MANIFEST_VERSION" ]; then
+            echo "Provided version ($VERSION) does not match manifest version ($MANIFEST_VERSION)."
             exit 1
           fi
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Create and push tag
+        run: |
+          TAG="${{ steps.version.outputs.version }}"
+          if git rev-parse "refs/tags/$TAG" >/dev/null 2>&1; then
+            echo "Tag $TAG already exists."
+            exit 1
+          fi
+          if git ls-remote --tags origin "refs/tags/$TAG" | grep -q "$TAG"; then
+            echo "Tag $TAG already exists on origin."
+            exit 1
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git tag -a "$TAG" -m "Release $TAG"
+          git push origin "refs/tags/$TAG"
 
       - name: Create GitHub release
         uses: softprops/action-gh-release@v2
         with:
-          name: ${{ github.ref_name }}
-          tag_name: ${{ github.ref_name }}
+          name: ${{ steps.version.outputs.version }}
+          tag_name: ${{ steps.version.outputs.version }}
           fail_on_unmatched_files: true
           files: |
             manifest.json
