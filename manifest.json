@@ -4,7 +4,7 @@
 	"version": "0.1.36",
 	"minAppVersion": "1.5.0",
 	"description": "Quick speech-to-text into a daily Inbox note via Whisper WASM, with mobile command.",
-	"author": "octohsrimpy",
-	"authorUrl": "github.com/octoshrimpy",
+	"author": "octoshrimpy",
+	"authorUrl": "https://github.com/octoshrimpy",
 	"isDesktopOnly": false
 }
