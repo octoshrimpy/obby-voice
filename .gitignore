@@ -22,5 +22,8 @@ data.json
 vendor/transformers.min.js
 vendor/wasm/
 
+# Claude Code
+.claude
+
 # Exclude macOS Finder (System Explorer) View States
 .DS_Store
