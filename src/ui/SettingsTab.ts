@@ -1,6 +1,9 @@
-import { App, Plugin, PluginSettingTab, Setting } from "obsidian";
+// src/ui/SettingsTab.ts
+import { App, Plugin, PluginSettingTab, Setting, normalizePath } from "obsidian";
 import type { ObbyVoiceSettings } from "../types";
 import { listInputDevices } from "../audio";
+import { getASRPipeline } from "../asr";
+import { ensureHFModelInVault } from "../storage";
 
 export class ObbyVoiceSettingsTab extends PluginSettingTab {
   constructor(
@@ -58,18 +61,92 @@ export class ObbyVoiceSettingsTab extends PluginSettingTab {
           })
       );
 
-    // ---------- Model ----------
+    // ---------- Speech-to-text (Whisper via @xenova/transformers) ----------
+    containerEl.createEl("h4", { text: "Speech-to-text (Whisper)" });
+
+    const KNOWN_MODELS: Record<string, string> = {
+      "Tiny (English-only, fastest)": "Xenova/whisper-tiny.en",
+      "Base (English-only)":          "Xenova/whisper-base.en",
+      "Small (English-only)":         "Xenova/whisper-small.en",
+      "Medium (English-only, slower)": "Xenova/whisper-medium.en",
+    };
+
     new Setting(containerEl)
-      .setName("ASR model (HuggingFace id)")
-      .setDesc("Examples: Xenova/whisper-tiny.en, Xenova/whisper-base.en")
-      .addText((t) =>
-        t.setPlaceholder("Xenova/whisper-tiny.en")
-          .setValue(settings.modelId)
-          .onChange(async (v) => {
-            settings.modelId = v || "Xenova/whisper-tiny.en";
-            await this.save();
-          })
-      );
+      .setName("ASR model")
+      .setDesc("Known-good ONNX models for Transformers.js (tiny/base recommended).")
+      .addDropdown((d) => {
+        // add the curated options
+        for (const [label, id] of Object.entries(KNOWN_MODELS)) {
+          d.addOption(id, label);
+        }
+
+        const current = (settings.modelId || "").trim();
+        const knownIds = new Set(Object.values(KNOWN_MODELS));
+
+        // If a custom model was previously saved, keep it selectable
+        if (current && !knownIds.has(current)) {
+          d.addOption(current, `Custom: ${current}`);
+        }
+
+        // Choose initial value (default to tiny)
+        const initial = current && (knownIds.has(current) || !!Array.from((d as any).selectEl.options).find((o: any) => o.value === current))
+          ? current
+          : KNOWN_MODELS["Tiny (English-only, fastest)"];
+
+        d.setValue(initial);
+        settings.modelId = initial;
+
+        d.onChange(async (value: string) => {
+          settings.modelId = value || KNOWN_MODELS["Tiny (English-only, fastest)"];
+          await this.save();
+        });
+      });
+
+    // Model verify/download with live progress (mirror → validate → warm)
+    const modelRow = new Setting(containerEl).setName("Model assets");
+    const modelStatusEl = modelRow.controlEl.createEl("div", { text: "Not checked." });
+    const setModelStatus = (msg: string) => { modelStatusEl.textContent = msg; };
+
+    modelRow.addButton((b) => {
+      b.setButtonText("Verify / Download")
+        .setCta()
+        .onClick(async () => {
+          const modelId = (settings.modelId?.trim()) || "Xenova/whisper-tiny.en";
+          try {
+            setModelStatus("Checking Hugging Face…");
+            const onProgress = (msg: string, pct?: number) =>
+              setModelStatus(pct != null ? `${msg} (${pct}%)` : msg);
+
+            // 1) Mirror repo files into the vault (idempotent)
+            const { modelDir, fileCount } = await ensureHFModelInVault(
+              this.app,
+              modelId,
+              "Obby Voice/models/hf",
+              onProgress
+            );
+
+            // 2) Validate config.json says "whisper"
+            const cfgPath = normalizePath(`${modelDir}/config.json`);
+            const raw = await this.app.vault.adapter.read(cfgPath);
+            const cfg = JSON.parse(raw);
+            const mt = (cfg?.model_type || "").toLowerCase();
+            if (mt !== "whisper") {
+              throw new Error(`Invalid model_type in config.json: ${cfg?.model_type ?? "unknown"}`);
+            }
+
+            // Warm/verify pipeline
+            await getASRPipeline(modelId, onProgress);
+
+            setModelStatus(`Ready ✓  (${fileCount} files in ${modelDir})`);
+          } catch (err: any) {
+            const hint =
+              /Unsupported model type: whisper/i.test(String(err?.message))
+                ? " (Hint: ensure you're on @xenova/transformers and using a Xenova/whisper-* ONNX repo)"
+                : "";
+            setModelStatus(`Error: ${err?.message ?? String(err)}${hint}`);
+          }
+        });
+    });
 
     // ---------- Microphone (single dropdown, self-primes permission) ----------
     containerEl.createEl("h4", { text: "Microphone" });
@@ -94,15 +171,12 @@ export class ObbyVoiceSettingsTab extends PluginSettingTab {
     await rebuild();
 
     // On first user interaction with the dropdown, prime permission and rebuild
-    // (user gesture is required by some Chromium/Electron builds)
-    // We only do this once; subsequent clicks won’t spam prompts.
     const primeOnce = async () => {
       if (await labelsAreBlank()) {
         let warm: MediaStream | null = null;
         try {
           warm = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
         } catch {
-          // user denied; keep IDs with blank labels
         } finally {
           try { warm?.getTracks().forEach((t) => t.stop()); } catch {}
         }
@@ -176,8 +250,8 @@ export class ObbyVoiceSettingsTab extends PluginSettingTab {
       .setName("Audio format")
       .setDesc("Choose the file format to save. MP3 is default.")
       .addDropdown((d) => {
-        d.addOption("mp3", "MP3 (mono, 16 kHz)");
-        d.addOption("webm", "WebM/Opus");
+        d.addOption("mp3", "MP3 (experimental)");
+        d.addOption("webm", "WebM/Opus (recommended)");
         d.setValue(settings.audioFormat as string);
         d.onChange(async (value: string) => {
           settings.audioFormat = value === "webm" ? "webm" : "mp3";

@@ -1,14 +1,14 @@
 {
 	"name": "obby-voice",
-	"version": "0.1.25",
+	"version": "0.1.36",
 	"private": true,
 	"license": "MIT",
 	"description": "Quick speech-to-text into a daily Inbox note via Whisper WASM, with mobile command.",
 	"main": "src/main.js",
 	"scripts": {
 		"dev": "esbuild 'src/main.ts' --bundle --outfile=main.js --format=cjs --platform=browser --target=es2020 --external:obsidian --watch",
-		"build": "node ./version-bump.mjs && esbuild 'src/main.ts' --bundle --minify --outfile=main.js --format=cjs --platform=browser --target=es2020 --external:obsidian",
-		"deploy": "cpy 'manifest.json' 'styles.css' 'main.js' \"/var/home/octoshrimpy/Documents/Project Luminari/.obsidian/plugins/obby-voice/\" --parents --no-overwrite=false",
+		"build": "node ./version-bump.mjs && esbuild 'src/main.ts' --bundle --minify --outfile=main.js --format=cjs --platform=browser --target=es2020 --external:obsidian --external:@xenova/transformers && esbuild node_modules/lamejs/lame.min.js --bundle --outfile=vendor/lamejs.js --format=iife --global-name=lamejs && cp node_modules/@xenova/transformers/dist/transformers.min.js vendor/ && mkdir -p vendor/wasm && cp node_modules/@xenova/transformers/dist/ort-wasm.wasm node_modules/@xenova/transformers/dist/ort-wasm-simd.wasm vendor/wasm/",
+		"deploy": "cpy 'manifest.json' 'styles.css' 'main.js' \"/var/home/octoshrimpy/Documents/Project Luminari/.obsidian/plugins/obby-voice/\" --no-overwrite=false && cpy 'vendor/**' \"/var/home/octoshrimpy/Documents/Project Luminari/.obsidian/plugins/obby-voice/vendor/\" --no-overwrite=false",
 		"local:patch": "npm --no-git-tag-version version patch && npm run build && npm run deploy",
 		"local:minor": "npm --no-git-tag-version version minor && npm run build && npm run deploy",
 		"local:major": "npm --no-git-tag-version version major && npm run build && npm run deploy"
@@ -29,7 +29,8 @@
 	},
 	"dependencies": {
 		"@xenova/transformers": "^2.17.2",
-		"lamejs": "^1.2.1"
+		"lamejs": "^1.2.1",
+		"vosk-browser": "^0.0.8"
 	},
 	"git-tag-version": false
 }

@@ -1,8 +1,22 @@
-/*
+/* Recording state indicator on the ribbon icon */
+.obby-voice-recording {
+  position: relative;
+}
 
-This CSS file will be included with your plugin, and
-available in the app when your plugin is enabled.
+.obby-voice-recording::after {
+  content: "";
+  position: absolute;
+  top: 4px;
+  right: 4px;
+  width: 7px;
+  height: 7px;
+  background: var(--color-red);
+  border-radius: 50%;
+  animation: obby-voice-pulse 1s ease-in-out infinite;
+  pointer-events: none;
+}
 
-If your plugin does not need CSS, delete this file.
-
-*/
+@keyframes obby-voice-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.25; }
+}

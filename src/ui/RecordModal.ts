@@ -2,10 +2,18 @@ import { App, Modal, Notice } from "obsidian";
 import type { ObbyVoiceSettings } from "../types";
 import { ensureMicPermission, pickMimeType, decodeAndResampleTo16k } from "../audio";
 import { getASRPipeline, transcribePCM16k } from "../asr";
-import { appendToDailyInbox, saveAudioPerSettings } from "../storage";
+import { appendToDailyInbox, saveAudioBinary, saveAudioPerSettings } from "../storage";
+import type ObbyVoicePlugin from "../main";
+
+export interface RecordModalCallbacks {
+  onRecordingStarted?: () => void;
+  onClosed?: () => void;
+}
 
 export class RecordModal extends Modal {
+  private plugin: ObbyVoicePlugin;
   private settings: ObbyVoiceSettings;
+  private callbacks?: RecordModalCallbacks;
   private stream?: MediaStream;
   private recorder?: MediaRecorder;
   private chunks: BlobPart[] = [];
@@ -31,9 +39,11 @@ export class RecordModal extends Modal {
   private savedPathEl!: HTMLDivElement;
   private objectURL?: string;
 
-  constructor(app: App, settings: ObbyVoiceSettings) {
+  constructor(app: App, settings: ObbyVoiceSettings, plugin: ObbyVoicePlugin, callbacks?: RecordModalCallbacks) {
     super(app);
     this.settings = settings;
+    this.plugin = plugin;
+    this.callbacks = callbacks;
   }
 
   onOpen() {
@@ -95,6 +105,11 @@ export class RecordModal extends Modal {
 
   async openAndAutoStart() { this.open(); await this.toggleRecording(); }
 
+  /** Called by the plugin ribbon/command to stop an in-progress recording. */
+  public stop() {
+    if (this.state === "recording") this.stopAndTranscribe();
+  }
+
   private async toggleRecording() {
     if (this.state === "idle") await this.startRecording();
     else if (this.state === "recording") await this.stopAndTranscribe();
@@ -141,8 +156,9 @@ export class RecordModal extends Modal {
       this.state = "recording";
       this.note.setText(`Recording from: ${details}`);
       this.btn.setText("Stop");
+      this.callbacks?.onRecordingStarted?.();
 
-      // preload model
+      // preload model (likely already warm from plugin onload, but covers model-change case)
       try {
         await getASRPipeline(this.settings.modelId, (msg, pct) => {
           this.note.innerText = pct !== undefined ? `Recording from: ${details}\n${msg} ${pct}%` : `Recording from: ${details}\n${msg}`;
@@ -227,6 +243,7 @@ export class RecordModal extends Modal {
 
     const endedAtMs = Date.now();
     const durationMs = Math.max(0, endedAtMs - this.startedAtMs);
+    const when = new Date(endedAtMs);
 
     if (!webmBlob || webmBlob.size === 0) {
       await appendToDailyInbox(this.app, this.settings, `(recording error)`, new Date(endedAtMs));
@@ -248,8 +265,8 @@ export class RecordModal extends Modal {
 
       this.note.setText("Transcribing…");
       const text = await transcribePCM16k(pcm16k, this.settings.modelId);
+      const saved = await saveAudioPerSettings(this.plugin, pcm16k, webmBlob, when);
 
-      const saved = await saveAudioPerSettings(this.app, this.settings, pcm16k, webmBlob, new Date(endedAtMs));
       const savedPath = saved.path;
       const audioLink = savedPath ? ` [[${savedPath}|audio]]` : "";
 
@@ -274,12 +291,16 @@ export class RecordModal extends Modal {
       this.btn.setText("Close");
       this.btn.onclick = () => this.close();
 
+      // Auto-close after a brief moment so the user can glance at the transcript
+      setTimeout(() => { if (this.state === "finished") this.close(); }, 2000);
+
     } catch (e: any) {
+      console.error("[Obby Voice] Transcription failed:", e);
       try {
-        const saved = await saveAudioPerSettings(this.app, this.settings, new Float32Array(0), webmBlob, new Date(endedAtMs));
-        if (saved.path) {
-          await appendToDailyInbox(this.app, this.settings, `(transcription error) [[${saved.path}|audio]]`, new Date(endedAtMs));
-          this.showResultsUI({ transcript: "(transcription error)", objectUrl: this.objectURL!, savedPath: saved.path, usedFormat: saved.used });
+        if (this.plugin.settings.saveAudioFile) {
+          const savedPath = await saveAudioBinary(this.plugin, await webmBlob.arrayBuffer(), when, "webm");
+          await appendToDailyInbox(this.app, this.settings, `(transcription error) [[${savedPath}|audio]]`, new Date(endedAtMs));
+          this.showResultsUI({ transcript: "(transcription error)", objectUrl: this.objectURL!, savedPath, usedFormat: "webm" });
           this.state = "finished"; this.btn.setText("Close"); this.btn.onclick = () => this.close();
           new Notice("Transcription failed; audio saved and noted in Inbox.");
           return;
@@ -306,5 +327,6 @@ export class RecordModal extends Modal {
     this.stream?.getTracks().forEach((t) => t.stop());
     this.contentEl.empty();
     this.state = "idle";
+    this.callbacks?.onClosed?.();
   }
 }

@@ -18,5 +18,9 @@ main.js
 # obsidian
 data.json
 
+# Generated vendor files (copied from node_modules during build)
+vendor/transformers.min.js
+vendor/wasm/
+
 # Exclude macOS Finder (System Explorer) View States
 .DS_Store

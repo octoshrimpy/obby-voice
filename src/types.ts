@@ -1,5 +1,3 @@
-import { moment } from "obsidian";
-
 export interface ObbyVoiceSettings {
   // Inbox / note formatting
   inboxFolder: string;            // e.g., "Inbox"
@@ -14,7 +12,7 @@ export interface ObbyVoiceSettings {
 
   // Audio saving
   saveAudioFile: boolean;         // true = save audio alongside transcript
-  audioFormat: "mp3" | "webm";    // default mp3
+  audioFormat: "webm" | "mp3";    // default webm
   audioSubfolder: string;         // subfolder inside inbox to store audio
 
   // Low-confidence behavior
